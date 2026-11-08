@@ -1,0 +1,22 @@
+purpose:
+  stands_in_for: Provision Home account login, streaming tickets, and camera movement.
+  unblocks: Desktop client checks without a phone or real account credentials.
+assumptions:
+  - id: observed-client-contract
+    status: supported
+    claim: The Android client uses account/login/, device/getWebrtcTicket, and device/rotate with Provision tenant metadata and raw account Authorization.
+    reason: The contract was derived from the Android client interface and request models.
+    source: postman/contracts/provision-home.openapi.json
+  - id: synthetic-responses
+    status: supported
+    claim: Tests establish desktop behavior under the mock's modeled responses.
+    reason: The real Python client sends HTTP requests to the local simulation; its recorded requests are asserted by the tests.
+    source: tests/test_auth.py; postman/mocks/provision/handler.js
+  - id: account-metadata
+    status: supported
+    claim: Country and time-zone fields are supplied by configuration, with neutral defaults.
+    reason: Private configuration loading and actual HTTP serialization are covered by tests using synthetic metadata.
+    source: camera_config.py; provision_auth.py; tests/test_settings.py; tests/test_auth.py
+unknowns:
+  - Natural account-token expiration is not established by synthetic expiration tests.
+  - Synthetic responses do not establish current provider availability or acceptance for every account region.

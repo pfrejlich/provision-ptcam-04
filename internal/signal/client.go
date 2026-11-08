@@ -16,29 +16,29 @@ import (
 
 // message is the generic WebSocket message envelope.
 type message struct {
-	Method             string `json:"method"`
-	Code               *int   `json:"code,omitempty"`
-	Message            string `json:"message,omitempty"`
-	ClientType         string `json:"clientType,omitempty"`
-	ClientID           string `json:"clientId,omitempty"`
-	Status             string `json:"status,omitempty"`
-	AccessToken        string `json:"accessToken,omitempty"`
-	ID                 string `json:"id,omitempty"`
-	Role               string `json:"role,omitempty"`
-	Name               string `json:"name,omitempty"`
-	Group              string `json:"group,omitempty"`
-	TraceID            string `json:"traceId,omitempty"`
-	RecipientClientID  string `json:"recipientClientId,omitempty"`
-	SenderClientID     string `json:"senderClientId,omitempty"`
-	SessionID          string `json:"sessionId,omitempty"`
-	MessageType        string `json:"messageType,omitempty"`
-	MessagePayload     string `json:"messagePayload,omitempty"`
-	Mode               string `json:"mode,omitempty"`
-	ViewerType         string `json:"viewerType,omitempty"`
-	Resolution         string `json:"resolution,omitempty"`
-	Version            string `json:"version,omitempty"`
-	Timestamp          int64  `json:"timestamp,omitempty"`
-	Reason             int    `json:"reason,omitempty"`
+	Method            string `json:"method"`
+	Code              *int   `json:"code,omitempty"`
+	Message           string `json:"message,omitempty"`
+	ClientType        string `json:"clientType,omitempty"`
+	ClientID          string `json:"clientId,omitempty"`
+	Status            string `json:"status,omitempty"`
+	AccessToken       string `json:"accessToken,omitempty"`
+	ID                string `json:"id,omitempty"`
+	Role              string `json:"role,omitempty"`
+	Name              string `json:"name,omitempty"`
+	Group             string `json:"group,omitempty"`
+	TraceID           string `json:"traceId,omitempty"`
+	RecipientClientID string `json:"recipientClientId,omitempty"`
+	SenderClientID    string `json:"senderClientId,omitempty"`
+	SessionID         string `json:"sessionId,omitempty"`
+	MessageType       string `json:"messageType,omitempty"`
+	MessagePayload    string `json:"messagePayload,omitempty"`
+	Mode              string `json:"mode,omitempty"`
+	ViewerType        string `json:"viewerType,omitempty"`
+	Resolution        string `json:"resolution,omitempty"`
+	Version           string `json:"version,omitempty"`
+	Timestamp         int64  `json:"timestamp,omitempty"`
+	Reason            int    `json:"reason,omitempty"`
 }
 
 // Client manages the WebSocket connection to the signaling server.
@@ -111,7 +111,9 @@ func (c *Client) sendJSON(msg any) {
 		log.Printf("[signal] marshal error: %v", err)
 		return
 	}
-	log.Printf("[signal] >>> %s", string(data))
+	if envelope, ok := msg.(message); ok {
+		log.Printf("[signal] sending %s", envelope.Method)
+	}
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		log.Printf("[signal] write error: %v", err)
 	}
@@ -201,13 +203,12 @@ func (c *Client) readLoop() {
 			}
 		}
 
-		log.Printf("[signal] <<< %s", string(data))
-
 		var msg message
 		if err := json.Unmarshal(data, &msg); err != nil {
 			log.Printf("[signal] unmarshal error: %v", err)
 			continue
 		}
+		log.Printf("[signal] received %s", msg.Method)
 
 		c.dispatch(msg)
 	}

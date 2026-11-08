@@ -7,6 +7,8 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"vico_home/native/internal/domain"
@@ -21,11 +23,25 @@ type Peer struct {
 	dc            *pion.DataChannel
 	serialNumber  string
 	remoteDescSet chan struct{}
+	targetIP      string
+	targetMatched atomic.Bool
+	channelOpen   atomic.Bool
+	startOnce     sync.Once
+	resolution    string
+	videoSize     string
 }
 
 // NewPeer creates a PeerConnection with minimal codec registration and a DataChannel.
 func NewPeer(iceServers []domain.ICEServer, serialNumber string) (*Peer, error) {
 	m := &pion.MediaEngine{}
+	if err := m.RegisterCodec(pion.RTPCodecParameters{
+		RTPCodecCapability: pion.RTPCodecCapability{
+			MimeType: pion.MimeTypeH265, ClockRate: 90000,
+		},
+		PayloadType: 125,
+	}, pion.RTPCodecTypeVideo); err != nil {
+		return nil, fmt.Errorf("register H265: %w", err)
+	}
 
 	h264Codec := pion.RTPCodecParameters{
 		RTPCodecCapability: pion.RTPCodecCapability{
@@ -89,14 +105,25 @@ func NewPeer(iceServers []domain.ICEServer, serialNumber string) (*Peer, error) 
 		dc:            dc,
 		serialNumber:  serialNumber,
 		remoteDescSet: make(chan struct{}),
+		resolution:    "1280x720",
+		videoSize:     "medium",
 	}
 
 	dc.OnOpen(func() {
 		log.Printf("[webrtc] data channel opened")
-		p.sendStartLive()
+		p.channelOpen.Store(true)
+		p.tryStartLive()
 	})
 	dc.OnMessage(func(msg pion.DataChannelMessage) {
-		log.Printf("[webrtc] data channel message: %s", string(msg.Data))
+		log.Printf("[webrtc] data channel message: %d bytes", len(msg.Data))
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(msg.Data, &fields) == nil {
+			for _, key := range []string{"action", "code", "result", "status", "resolution", "size", "codec", "videoCodec"} {
+				if value, ok := fields[key]; ok && len(value) < 100 {
+					log.Printf("[webrtc] camera response %s=%s", key, value)
+				}
+			}
+		}
 	})
 	dc.OnClose(func() {
 		log.Printf("[webrtc] data channel closed")
@@ -131,7 +158,7 @@ func (p *Peer) AddTransceivers() error {
 	return nil
 }
 
-// SetOnTrack sets up the track handler. Video H264 is written to videoOut, audio is drained.
+// SetOnTrack writes H264 or H265 video to videoOut and drains audio.
 func (p *Peer) SetOnTrack(videoOut io.Writer) {
 	p.pc.OnTrack(func(track *pion.TrackRemote, receiver *pion.RTPReceiver) {
 		codec := track.Codec()
@@ -154,10 +181,15 @@ func (p *Peer) SetOnTrack(videoOut io.Writer) {
 }
 
 func (p *Peer) readVideoTrack(track *pion.TrackRemote, w io.Writer) {
-	log.Printf("[webrtc] reading H264 video track")
+	log.Printf("[webrtc] reading %s video track", track.Codec().MimeType)
 
 	startCode := []byte{0x00, 0x00, 0x00, 0x01}
-	depack := NewH264Depacketizer()
+	var depack interface {
+		Depacketize(uint16, []byte) [][]byte
+	} = NewH264Depacketizer()
+	if strings.EqualFold(track.Codec().MimeType, pion.MimeTypeH265) {
+		depack = &H265Depacketizer{}
+	}
 
 	for {
 		pkt, _, err := track.ReadRTP()
@@ -168,6 +200,9 @@ func (p *Peer) readVideoTrack(track *pion.TrackRemote, w io.Writer) {
 
 		nalus := depack.Depacketize(pkt.SequenceNumber, pkt.Payload)
 		for _, nalu := range nalus {
+			if p.targetIP != "" && !p.targetMatched.Load() {
+				continue
+			}
 			if len(nalu) == 0 {
 				continue
 			}
@@ -236,6 +271,15 @@ func (p *Peer) SetRemoteDescription(sdp domain.SDPPayload) error {
 	if err := p.pc.SetRemoteDescription(answer); err != nil {
 		return fmt.Errorf("set remote description: %w", err)
 	}
+	for _, line := range strings.Split(sdp.SDP, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "m=") || strings.HasPrefix(line, "a=rtpmap:") {
+			log.Printf("[webrtc] negotiated %s", line)
+		}
+		if strings.HasPrefix(line, "a=candidate:") {
+			p.observeRemoteCandidate(strings.TrimPrefix(line, "a="))
+		}
+	}
 
 	log.Printf("[webrtc] remote SDP answer set")
 	close(p.remoteDescSet)
@@ -256,9 +300,40 @@ func (p *Peer) AddRemoteICECandidate(candidate domain.ICECandidatePayload) error
 	if err := p.pc.AddICECandidate(init); err != nil {
 		return fmt.Errorf("add ice candidate: %w", err)
 	}
+	p.observeRemoteCandidate(candidate.Candidate)
 
 	log.Printf("[webrtc] added remote ICE candidate")
 	return nil
+}
+
+// RequireTargetIP prevents requesting or writing video until the camera advertises
+// the expected address. A relay-only session cannot satisfy this identity check.
+func (p *Peer) RequireTargetIP(ip string) {
+	p.targetIP = ip
+}
+
+// SetStreamQuality sets the app protocol's requested quality before connecting.
+func (p *Peer) SetStreamQuality(resolution, size string) {
+	p.resolution, p.videoSize = resolution, size
+}
+
+func (p *Peer) observeRemoteCandidate(candidate string) {
+	fields := strings.Fields(candidate)
+	if p.targetIP == "" || len(fields) < 8 || !strings.HasPrefix(fields[0], "candidate:") {
+		return
+	}
+	log.Printf("[webrtc] remote ICE address: %s", fields[4])
+	if fields[4] == p.targetIP {
+		p.targetMatched.Store(true)
+		log.Printf("[webrtc] camera advertised the requested address %s", p.targetIP)
+		p.tryStartLive()
+	}
+}
+
+func (p *Peer) tryStartLive() {
+	if p.channelOpen.Load() && (p.targetIP == "" || p.targetMatched.Load()) {
+		p.startOnce.Do(p.sendStartLive)
+	}
 }
 
 // startLiveCommand is the JSON command sent over the DataChannel to start live streaming.
@@ -278,8 +353,8 @@ func (p *Peer) sendStartLive() {
 		RequestID:    ts,
 		ConnectionID: "",
 		TimeStamp:    ts,
-		Size:         "medium",
-		Resolution:   "1280x720",
+		Size:         p.videoSize,
+		Resolution:   p.resolution,
 	}
 
 	data, _ := json.Marshal(cmd)

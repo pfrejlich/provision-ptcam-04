@@ -1,0 +1,12 @@
+version: 1
+id: dcf7b25d-026e-4fa8-989f-5dca9c73afcb
+name: Provision Home
+slug: provision-home
+protocol: http
+origin: https://api-eu.provisionisr-app.com
+interceptRequests: true
+port: 43861
+scenarios:
+  - name: default
+    path: ./handler.js
+    default: true

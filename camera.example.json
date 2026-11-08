@@ -1,0 +1,18 @@
+{
+  "cameras": [
+    {
+      "name": "Camera A",
+      "serial": "YOUR_CAMERA_1_SERIAL",
+      "camera_ip": "192.0.2.10"
+    },
+    {
+      "name": "Camera B",
+      "serial": "YOUR_CAMERA_2_SERIAL",
+      "camera_ip": "192.0.2.11"
+    }
+  ],
+  "account": {
+    "country_no": "US",
+    "time_zone": "UTC"
+  }
+}

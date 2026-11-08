@@ -1,4 +1,31 @@
 *.mp4
 .DS_Store
-vicostream
+/vicostream
+
+/.tools/
+/private/
+/provisionprobe.exe
+__pycache__/
+*.pyc
+*.hevc
+*.h26x
+*.dpapi
+
+# Local configuration, credentials, logs, and captures
+/camera.local.json
+.env
+.env.*
+!.env.example
+ticket.json
+*-ticket.json
+*.log
+*.h264
+*.h265
+/build/
+/samples/
+
+# Machine-specific launchers and local verification reports
+/Watch-*.ps1
+!/Watch-Camera.ps1
+/docs/*-verification.json
 

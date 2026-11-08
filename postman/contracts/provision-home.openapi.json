@@ -1,0 +1,326 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Provision Home account and streaming sessions",
+    "version": "1.0.0",
+    "description": "Observed Android 1.3.5 contract. Login and ticket paths, raw Authorization header, and app metadata came from the installed app. Error fixtures are synthetic unless identified in the simulation context."
+  },
+  "servers": [
+    {
+      "url": "https://api-eu.provisionisr-app.com"
+    }
+  ],
+  "paths": {
+    "/account/login/": {
+      "post": {
+        "operationId": "login",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "countryNo",
+                  "language",
+                  "app",
+                  "email",
+                  "password",
+                  "loginType"
+                ],
+                "properties": {
+                  "countryNo": {
+                    "type": "string",
+                    "example": "US"
+                  },
+                  "language": {
+                    "type": "string",
+                    "example": "en"
+                  },
+                  "app": {
+                    "type": "object",
+                    "required": [
+                      "bundle",
+                      "tenantId"
+                    ],
+                    "properties": {
+                      "bundle": {
+                        "type": "string",
+                        "enum": [
+                          "com.provisionhome.app"
+                        ]
+                      },
+                      "tenantId": {
+                        "type": "string",
+                        "enum": [
+                          "provisionhome"
+                        ]
+                      }
+                    }
+                  },
+                  "email": {
+                    "type": "string"
+                  },
+                  "password": {
+                    "type": "string",
+                    "format": "password"
+                  },
+                  "loginType": {
+                    "type": "integer",
+                    "enum": [
+                      0
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Provider result code must be checked even on HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "result",
+                    "data"
+                  ]
+                },
+                "example": {
+                  "result": 0,
+                  "data": {
+                    "token": {
+                      "token": "synthetic-account-token"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication rejected"
+          },
+          "500": {
+            "description": "Upstream unavailable"
+          }
+        }
+      }
+    },
+    "/device/getWebrtcTicket": {
+      "post": {
+        "operationId": "getWebrtcTicket",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "countryNo",
+                  "language",
+                  "app",
+                  "serialNumber"
+                ],
+                "properties": {
+                  "countryNo": {
+                    "type": "string",
+                    "example": "US"
+                  },
+                  "language": {
+                    "type": "string",
+                    "example": "en"
+                  },
+                  "app": {
+                    "type": "object",
+                    "required": [
+                      "bundle",
+                      "tenantId"
+                    ],
+                    "properties": {
+                      "bundle": {
+                        "type": "string",
+                        "enum": [
+                          "com.provisionhome.app"
+                        ]
+                      },
+                      "tenantId": {
+                        "type": "string",
+                        "enum": [
+                          "provisionhome"
+                        ]
+                      }
+                    }
+                  },
+                  "serialNumber": {
+                    "type": "string"
+                  },
+                  "requestId": {
+                    "type": "string"
+                  },
+                  "supportUnlimitedWebsocket": {
+                    "type": "boolean"
+                  },
+                  "list": {
+                    "type": "array",
+                    "items": {}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Provider result code must be checked even on HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "result",
+                    "data"
+                  ]
+                },
+                "example": {
+                  "result": 0,
+                  "data": {
+                    "id": "synthetic-viewer",
+                    "accessToken": "synthetic-signaling-token",
+                    "signalServer": "wss://p-signal-test.smartvideogo.com",
+                    "websocketPath": "/iot-channel/connect",
+                    "expirationTime": 4102444800000,
+                    "iceServer": []
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication rejected"
+          },
+          "500": {
+            "description": "Upstream unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Account authorization string used by the Android app; not the WebRTC accessToken."
+          }
+        ]
+      }
+    },
+    "/device/rotate": {
+      "post": {
+        "operationId": "rotateCamera",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "countryNo",
+                  "language",
+                  "app",
+                  "serialNumber",
+                  "pitch",
+                  "yaw"
+                ],
+                "properties": {
+                  "countryNo": {
+                    "type": "string",
+                    "example": "US"
+                  },
+                  "language": {
+                    "type": "string",
+                    "example": "en"
+                  },
+                  "app": {
+                    "type": "object",
+                    "required": [
+                      "bundle",
+                      "tenantId"
+                    ],
+                    "properties": {
+                      "bundle": {
+                        "type": "string",
+                        "enum": [
+                          "com.provisionhome.app"
+                        ]
+                      },
+                      "tenantId": {
+                        "type": "string",
+                        "enum": [
+                          "provisionhome"
+                        ]
+                      }
+                    }
+                  },
+                  "serialNumber": {
+                    "type": "string"
+                  },
+                  "pitch": {
+                    "type": "number",
+                    "minimum": -1,
+                    "maximum": 1
+                  },
+                  "yaw": {
+                    "type": "number",
+                    "minimum": -1,
+                    "maximum": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Provider result code must be checked even on HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "result",
+                    "data"
+                  ]
+                },
+                "example": {
+                  "result": 0,
+                  "data": {}
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication rejected"
+          },
+          "500": {
+            "description": "Upstream unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Account authorization string used by the Android app; not the WebRTC accessToken."
+          }
+        ],
+        "description": "Normalized pitch/yaw from the installed app RockerPositionEntry. Zero on both axes stops movement."
+      }
+    }
+  }
+}
