@@ -1,47 +1,39 @@
-"""Camera selection, responsive video, loading feedback, and directional controls."""
+"""Single-camera and simultaneous security station viewing with shared sign-in."""
 
 import io
 import queue
 import shutil
-import threading
 
-from camera_session import MotionWorker, PlaybackSwitcher, StreamSession
+from camera_session import LoginCoordinator, MotionWorker, PlaybackGroup, PlaybackSwitcher, StreamSession
+from camera_tile import CameraTile, fit_size, grid_shape
 
 
-def fit_size(source, available):
-    """Largest whole-pixel image that fits without stretching or cropping."""
-    width, height = source
-    limit_width, limit_height = available
-    scale = min(max(1, limit_width) / width, max(1, limit_height) / height)
-    return max(1, int(width * scale)), max(1, int(height * scale))
+STATION_LABEL = "All cameras — Security station"
 
 
 class Playback:
     def __init__(self, viewer, profile):
+        self.viewer, self.profile = viewer, profile
         camera = viewer.camera
-        self.profile = profile
         self.access = camera.CameraAccess(profile)
         self.initial = viewer.args.refresh
         self.notify = lambda kind, value: viewer.events.put((self, kind, value))
         command = [str(camera.RECEIVER), "-ticket", str(self.access.ticket_path), "-serial", profile.serial,
                    "-target-ip", profile.camera_ip, "-resolution", viewer.args.resolution, "-size", viewer.args.size]
+        frame_width = int(viewer.args.resolution.split("x")[0])
+        if viewer.station_mode and len(viewer.cameras) > 1:
+            frame_width = min(frame_width, 1280)
         self.session = StreamSession(self.prepare_ticket, command, viewer.ffmpeg,
-                                     camera.STATE_ROOT / "logs" / "desktop-viewer.log", self.notify,
-                                     frame_width=viewer.args.resolution.split("x")[0])
+                                     self.access.ticket_path.with_suffix(".log"), self.notify,
+                                     frame_width=frame_width)
         self.motion = MotionWorker(lambda direction: camera.cloud_client(timeout=3).rotate(profile.serial, direction),
                                    self.notify)
 
     def prepare_ticket(self, force):
         initial, self.initial = self.initial, False
-        return self.access.ensure_ticket(force or initial, login=self.request_login)
-
-    def request_login(self):
-        request = {"event": threading.Event(), "success": False}
-        self.notify("login", request)
-        while not request["event"].wait(0.1):
-            if self.session.stop.is_set():
-                return False
-        return request["success"]
+        observed = self.viewer.authentication.snapshot()
+        return self.access.ensure_ticket(force or initial, login=lambda: self.viewer.authentication.request(
+            self.notify, self.session.stop, observed))
 
     def start(self):
         self.session.start()
@@ -72,7 +64,10 @@ class Viewer:
             raise RuntimeError("FFmpeg is required to display camera video")
         self.cameras = tuple(getattr(args, "cameras", None) or camera.load_cameras())
         self.switcher = PlaybackSwitcher()
+        self.authentication = LoginCoordinator()
         self.playback = None
+        self.tiles = {}
+        self.station_mode = False
         self.root = tk.Tk()
         self.root.title("Provision cameras")
         self.root.geometry("1100x760")
@@ -83,34 +78,24 @@ class Viewer:
         self.closed = False
         self.login_open = False
         self.pending_login = None
-        self.image = None
-        self.source_image = None
-        self.rendered_size = None
-        self.resize_job = None
+        self.layout_job = None
+        self.grid_dimensions = (1, 1)
         self.displayed_frames = 0
         self.connected = False
-        self.loading_active = False
-        self.status = tk.StringVar(value="Select a camera to start watching.")
-        self.motion_status = tk.StringVar(value="Use the buttons or arrow keys to move the selected camera.")
+        self.status = tk.StringVar(master=self.root, value="Select a camera or security station to start watching.")
+        self.motion_status = tk.StringVar(master=self.root, value="Select a camera for movement controls.")
         toolbar = ttk.Frame(self.root, padding=(16, 12))
         toolbar.grid(row=0, column=0, sticky="ew")
-        ttk.Label(toolbar, text="Camera").pack(side="left", padx=(0, 10))
-        self.selection = tk.StringVar(value="")
-        self.selector = ttk.Combobox(toolbar, textvariable=self.selection, state="readonly", width=36,
-                                     values=[profile.name for profile in self.cameras])
+        ttk.Label(toolbar, text="View").pack(side="left", padx=(0, 10))
+        self.selection = tk.StringVar(master=self.root, value="")
+        self.selector = ttk.Combobox(toolbar, textvariable=self.selection, state="readonly", width=40,
+                                     values=[profile.name for profile in self.cameras] + [STATION_LABEL])
         self.selector.pack(side="left", fill="x", expand=True)
         self.selector.bind("<<ComboboxSelected>>", self.select_camera)
-        self.video = tk.Canvas(self.root, background="#151719", highlightthickness=0)
-        self.video.grid(row=1, column=0, sticky="nsew")
-        self.video_image = self.video.create_image(0, 0, anchor="center")
-        self.video_text = self.video.create_text(0, 0, text="Choose a camera above", fill="white",
-                                                  font=("Segoe UI", 16))
-        self.video.bind("<Configure>", self.resize_video)
-        self.loading_panel = ttk.Frame(self.video, padding=20)
-        self.loading_message = tk.StringVar()
-        ttk.Label(self.loading_panel, textvariable=self.loading_message).pack(pady=(0, 12))
-        self.loading_bar = ttk.Progressbar(self.loading_panel, mode="indeterminate", length=240)
-        self.loading_bar.pack()
+        self.video_panel = tk.Frame(self.root, background="#151719")
+        self.video_panel.grid(row=1, column=0, sticky="nsew")
+        self.video_panel.bind("<Configure>", self.queue_layout)
+        self.idle_tile = CameraTile(self)
         footer = ttk.Frame(self.root, padding=12)
         footer.grid(row=2, column=0, sticky="ew")
         ttk.Label(footer, textvariable=self.status).pack(anchor="w")
@@ -130,12 +115,35 @@ class Viewer:
             self.direction_buttons[direction] = button
         ttk.Label(footer, textvariable=self.motion_status).pack(anchor="center")
         for key, direction in [("Left", "left"), ("Right", "right"), ("Up", "up"), ("Down", "down"), ("space", "stop")]:
-            self.video.bind("<KeyPress-" + key + ">", lambda event, selected=direction: self.key_move(selected))
             self.root.bind("<KeyPress-" + key + ">", lambda event, selected=direction: self.key_move(selected))
-        self.video.bind("<Button-1>", lambda event: self.video.focus_set())
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.poll_job = self.root.after(30, self.poll)
+        self.layout_tiles()
         self.selector.focus_set()
+
+    @property
+    def active_tile(self):
+        return self.tiles.get(self.playback) or next(iter(self.tiles.values()), self.idle_tile)
+
+    @property
+    def video(self):
+        return self.active_tile.canvas
+
+    @property
+    def source_image(self):
+        return self.active_tile.source_image
+
+    @property
+    def rendered_size(self):
+        return self.active_tile.rendered_size
+
+    @property
+    def loading_active(self):
+        return self.active_tile.loading_active
+
+    @property
+    def loading_bar(self):
+        return self.active_tile.loading_bar
 
     @property
     def session(self):
@@ -145,27 +153,73 @@ class Viewer:
     def motion(self):
         return self.playback.motion if self.playback is not None else None
 
+    def queue_layout(self, event=None):
+        if self.layout_job is not None:
+            self.root.after_cancel(self.layout_job)
+        self.layout_job = self.root.after(75, self.layout_tiles)
+
+    def layout_tiles(self):
+        if self.layout_job is not None:
+            self.root.after_cancel(self.layout_job)
+        self.layout_job = None
+        if self.closed:
+            return
+        tiles = list(self.tiles.values()) or [self.idle_tile]
+        rows, columns = grid_shape(len(tiles), (self.video_panel.winfo_width(), self.video_panel.winfo_height()))
+        old_rows, old_columns = self.grid_dimensions
+        for row in range(max(rows, old_rows)):
+            self.video_panel.rowconfigure(row, weight=1 if row < rows else 0,
+                                          uniform="videos" if row < rows else "")
+        for column in range(max(columns, old_columns)):
+            self.video_panel.columnconfigure(column, weight=1 if column < columns else 0,
+                                             uniform="videos" if column < columns else "")
+        for index, tile in enumerate(tiles):
+            tile.frame.grid(row=index // columns, column=index % columns, sticky="nsew", padx=2, pady=2)
+        self.grid_dimensions = rows, columns
+
     def select_camera(self, event=None):
         if self.closed or self.login_open:
             return
         selected = self.selector.current()
         if selected < 0:
             return
-        profile = self.cameras[selected]
+        self.switcher.cancel()
+        self.authentication.reset()
+        self.playback = None
         self.set_connected(False)
-        self.root.title(profile.name + " — Provision camera")
-        self.source_image = self.image = None
-        self.video.itemconfigure(self.video_image, image="")
-        self.video.itemconfigure(self.video_text, text="")
-        self.status.set("Connecting to " + profile.name + "…")
-        self.motion_status.set("Use the buttons or arrow keys to move the selected camera.")
-        self.set_loading(True, "Loading " + profile.name + "…")
-        self.playback = Playback(self, profile)
-        self.switcher.select(self.playback)
-        self.video.focus_set()
+        for tile in self.tiles.values():
+            tile.destroy()
+        self.tiles.clear()
+        self.idle_tile.frame.grid_forget()
+        self.station_mode = selected == len(self.cameras)
+        profiles = self.cameras if self.station_mode else (self.cameras[selected],)
+        for profile in profiles:
+            playback = Playback(self, profile)
+            tile = CameraTile(self, profile, playback)
+            self.tiles[playback] = tile
+            tile.set_loading(True, "Loading " + profile.name + "…")
+        self.layout_tiles()
+        self.root.title("Security station — Provision cameras" if self.station_mode else profiles[0].name + " — Provision camera")
+        self.motion_status.set("Click a camera tile to choose its movement controls." if self.station_mode else
+                               "Use the buttons or arrow keys to move the selected camera.")
+        self.switcher.select(PlaybackGroup(self.tiles))
+        if not self.station_mode:
+            self.focus_camera(next(iter(self.tiles)))
+        self.update_status()
+
+    def focus_camera(self, playback):
+        if self.closed or self.login_open or playback not in self.tiles:
+            return
+        if self.playback is not playback and self.motion is not None and self.motion.busy:
+            self.motion.request("stop")
+        self.playback = playback
+        for candidate, tile in self.tiles.items():
+            tile.set_focused(candidate is playback)
+        self.set_connected(self.tiles[playback].connected)
+        self.motion_status.set("Controls: " + playback.profile.name + " — arrow keys or buttons; Space stops.")
+        self.tiles[playback].canvas.focus_set()
 
     def key_move(self, direction):
-        # Native combo-box keyboard navigation must not move a camera.
         if self.root.focus_get() is self.selector or self.login_open:
             return
         self.move(direction)
@@ -178,132 +232,132 @@ class Viewer:
     def set_connected(self, value):
         self.connected = value
         for button in self.buttons:
-            button.state(["!disabled"] if value else ["disabled"])
-
-    def set_loading(self, active, message="Loading camera…"):
-        self.loading_message.set(message)
-        if active:
-            self.loading_panel.place(relx=0.5, rely=0.5, anchor="center")
-            if not self.loading_active:
-                self.loading_bar.start(12)
-        else:
-            self.loading_bar.stop()
-            self.loading_panel.place_forget()
-        self.loading_active = active
-
-    def resize_video(self, event=None):
-        width, height = self.video.winfo_width(), self.video.winfo_height()
-        self.video.coords(self.video_image, width / 2, height / 2)
-        self.video.coords(self.video_text, width / 2, height / 2)
-        if self.resize_job is not None:
-            self.root.after_cancel(self.resize_job)
-        self.resize_job = self.root.after(75, self.render_resized)
-
-    def render_resized(self):
-        self.resize_job = None
-        self.render()
+            button.state(["!disabled"] if value and not self.login_open else ["disabled"])
 
     def render(self):
-        if self.closed or self.source_image is None:
-            return
-        available = (self.video.winfo_width(), self.video.winfo_height())
-        dimensions = fit_size(self.source_image.size, available)
-        resized = self.source_image.resize(dimensions, self.Image.Resampling.BILINEAR)
-        self.image = self.ImageTk.PhotoImage(resized, master=self.root)
-        self.video.itemconfigure(self.video_image, image=self.image)
-        self.video.coords(self.video_image, available[0] / 2, available[1] / 2)
-        self.rendered_size = dimensions
+        self.active_tile.render()
+
+    def update_status(self):
+        if self.station_mode and self.tiles:
+            live = sum(tile.connected for tile in self.tiles.values())
+            self.status.set(f"Security station — {live}/{len(self.tiles)} cameras live. Click a tile for controls.")
+        elif self.playback is not None:
+            tile = self.tiles[self.playback]
+            self.status.set(("Live — " if tile.connected else tile.status.get() + " — ") + self.playback.profile.name)
 
     def show_login(self, playback, request):
         from desktop_login import login_window
         self.login_open = True
         self.pending_login = request
         self.selector.state(["disabled"])
-        self.status.set("Sign in to continue")
         self.set_connected(False)
+        self.status.set("Sign in to continue")
+        success = False
         try:
-            request["success"] = login_window(self.camera.cloud_client(), playback.profile.serial,
-                                              playback.access.ticket_path, parent=self.root)
+            success = login_window(self.camera.cloud_client(), playback.profile.serial,
+                                   playback.access.ticket_path, parent=self.root)
         finally:
-            request["event"].set()
+            self.authentication.finish(request, success)
             self.pending_login = None
             self.login_open = False
             if not self.closed:
                 self.selector.state(["!disabled", "readonly"])
+                if self.playback is not None:
+                    self.set_connected(self.tiles[self.playback].connected)
+
+    def cancel_sign_in(self, playback, message):
+        tile = self.tiles[playback]
+        tile.connected = False
+        playback.cancel()
+        tile.set_loading(False)
+        tile.status.set("Sign-in required")
+        tile.canvas.itemconfigure(tile.video_text, text="Select this view again to sign in")
+        if not self.station_mode:
+            self.switcher.cancel()
+            self.playback = None
+            self.selection.set("")
+            tile.destroy()
+            self.tiles.clear()
+            self.layout_tiles()
+            self.status.set(message)
+        if self.playback is playback or self.playback is None:
+            self.set_connected(False)
+
+    def handle_event(self, playback, kind, value):
+        tile = self.tiles.get(playback)
+        if tile is None:
+            if kind == "login":
+                self.authentication.finish(value, False)
+            return
+        if kind == "status":
+            tile.connected = False
+            tile.status.set(value)
+            tile.set_loading(True, value)
+        elif kind == "offline":
+            tile.connected = False
+            tile.status.set("Reconnecting…")
+            tile.set_loading(True, "Reconnecting " + playback.profile.name + "…")
+            if playback.motion.busy:
+                playback.motion.request("stop")
+        elif kind in {"motion", "motion_error"}:
+            if playback is self.playback:
+                self.motion_status.set(value)
+        elif kind == "needs_login":
+            tile.connected = False
+            tile.status.set("Sign-in required")
+            tile.set_loading(True, "Renewing session…")
+            playback.session.reconnect()
+        elif kind == "login":
+            self.show_login(playback, value)
+        elif kind == "cancelled":
+            self.cancel_sign_in(playback, value)
+        if not self.closed and self.playback is playback and playback in self.tiles:
+            self.set_connected(tile.connected)
 
     def poll(self):
         if self.closed:
             return
+        # Modal sign-in runs a nested Tk loop; keep other tiles rendering in it.
+        self.poll_job = self.root.after(30, self.poll)
         try:
             while True:
-                playback, kind, value = self.events.get_nowait()
-                if playback is not self.playback:
-                    if kind == "login":
-                        value["event"].set()
-                    continue
-                if kind == "status":
-                    self.status.set(value)
-                    self.set_loading(True, value)
-                elif kind == "offline":
-                    self.set_connected(False)
-                    self.set_loading(True, "Reconnecting " + playback.profile.name + "…")
-                    if self.motion.busy:
-                        self.motion.request("stop")
-                elif kind in {"motion", "motion_error"}:
-                    self.motion_status.set(value)
-                elif kind == "needs_login":
-                    self.set_connected(False)
-                    self.set_loading(True, "Renewing session…")
-                    self.session.reconnect()
-                elif kind == "login":
-                    self.show_login(playback, value)
-                    if self.closed:
-                        return
-                elif kind == "cancelled":
-                    self.switcher.cancel()
-                    self.playback = None
-                    self.selection.set("")
-                    self.set_connected(False)
-                    self.set_loading(False)
-                    self.source_image = self.image = None
-                    self.video.itemconfigure(self.video_image, image="")
-                    self.video.itemconfigure(self.video_text, text="Choose a camera above")
-                    self.status.set(value)
+                self.handle_event(*self.events.get_nowait())
+                if self.closed:
+                    return
         except queue.Empty:
             pass
-        if self.closed:
-            return
-        if self.session is not None:
+        for playback, tile in list(self.tiles.items()):
+            if playback.session.stop.is_set():
+                continue
             try:
-                frame = self.session.frames.get_nowait()
+                frame = playback.session.frames.get_nowait()
                 with self.Image.open(io.BytesIO(frame)) as image:
-                    self.source_image = image.convert("RGB")
-                self.render()
+                    tile.display(image.convert("RGB"))
                 self.displayed_frames += 1
-                self.video.itemconfigure(self.video_text, text="")
-                self.set_loading(False)
-                if not self.login_open:
+                if playback is self.playback and not self.login_open:
                     self.set_connected(True)
-                    self.status.set("Live — " + self.playback.profile.name)
             except queue.Empty:
                 pass
             except (OSError, ValueError, self.tk.TclError):
                 if not self.closed:
-                    self.set_loading(True, "Reconnecting video…")
-                    self.session.reconnect()
-        self.poll_job = self.root.after(30, self.poll)
+                    tile.connected = False
+                    tile.status.set("Reconnecting video…")
+                    tile.set_loading(True, "Reconnecting video…")
+                    playback.session.reconnect()
+        if not self.login_open:
+            self.update_status()
 
     def close(self):
         if self.closed:
             return
         self.closed = True
-        if self.pending_login is not None:
-            self.pending_login["event"].set()
+        self.authentication.reset()
         self.switcher.cancel()
-        self.loading_bar.stop()
-        for job in (self.poll_job, self.resize_job):
+        for job in (self.poll_job, self.layout_job):
             if job is not None:
                 self.root.after_cancel(job)
+        for tile in [self.idle_tile, *self.tiles.values()]:
+            tile.destroy()
         self.root.destroy()
 
     def run(self):

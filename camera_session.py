@@ -124,6 +124,79 @@ def stop_process(process):
             process.wait()
 
 
+class PlaybackGroup:
+    """Start independent streams together and cancel all before closing any."""
+
+    def __init__(self, playbacks):
+        self.playbacks = tuple(playbacks)
+
+    def start(self):
+        for playback in self.playbacks:
+            playback.start()
+
+    def cancel(self):
+        for playback in self.playbacks:
+            playback.cancel()
+
+    def close(self):
+        self.cancel()
+        for playback in self.playbacks:
+            playback.close()
+
+
+class LoginCoordinator:
+    """Share one credential prompt across stream workers in the current view."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.version = 0
+        self.generation = 0
+        self.pending = None
+        self.paused = False
+
+    def snapshot(self):
+        with self.lock:
+            return self.generation, self.version
+
+    def reset(self):
+        with self.lock:
+            if self.pending is not None:
+                self.pending["event"].set()
+            self.pending = None
+            self.generation += 1
+            self.paused = False
+
+    def request(self, notify, stop, observed):
+        with self.lock:
+            generation, version = observed
+            if stop.is_set() or generation != self.generation or self.paused:
+                return False
+            if version < self.version:
+                return True
+            leader = self.pending is None
+            if leader:
+                self.pending = {"event": threading.Event(), "success": False,
+                                "generation": generation}
+            request = self.pending
+        if leader:
+            notify("login", request)
+        while not request["event"].wait(0.1):
+            if stop.is_set():
+                return False
+        return request["success"] and not stop.is_set()
+
+    def finish(self, request, success):
+        with self.lock:
+            if self.pending is request:
+                self.pending = None
+                if success:
+                    self.version += 1
+                else:
+                    self.paused = True
+            request["success"] = success
+            request["event"].set()
+
+
 class PlaybackSwitcher:
     """Stop an old camera before starting another, without blocking the UI."""
 

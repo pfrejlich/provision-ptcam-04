@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -147,6 +148,29 @@ class SimulatedAuthenticationTests(unittest.TestCase):
             self.assertTrue(second.ticket_path.exists())
             first.ensure_ticket()
         self.assertEqual([call['serialNumber'] for call in self.calls()], ['camera-a', 'camera-b'])
+
+    def test_simultaneous_expired_accounts_reauthenticate_only_once(self):
+        from concurrent.futures import ThreadPoolExecutor
+        gate = threading.Barrier(2)
+        thread_state = threading.local()
+        class ConcurrentStore(MemoryStore):
+            def load(self):
+                snapshot = super().load()
+                if not getattr(thread_state, 'loaded', False):
+                    thread_state.loaded = True
+                    gate.wait(timeout=3)
+                return snapshot
+        store = ConcurrentStore({'token': 'expired-account-token', 'api_base': self.base,
+                                 'email': 'owner@example.invalid', 'password': 'synthetic-password',
+                                 'expires_at': time.time() - 60})
+        def fetch(serial):
+            return CloudClient(store, self.base, timeout=2, allow_local_test=True).new_ticket(serial)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            replies = list(executor.map(fetch, ['camera-a', 'camera-b']))
+        self.assertEqual(len(replies), 2)
+        paths = [item['path'] for item in self.calls()]
+        self.assertEqual(paths.count('/account/login/'), 1)
+        self.assertEqual(paths.count('/device/getWebrtcTicket'), 2)
 
 
 if __name__ == '__main__':

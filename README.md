@@ -1,7 +1,7 @@
 # Provision PTCam-04 desktop client
 
 A Windows desktop client for Provision Home cameras with H.265 video,
-pan/tilt controls, camera selection, and automatic session renewal.
+pan/tilt controls, simultaneous security station viewing, and automatic session renewal.
 
 Based on [bbielsa/vicostream](https://github.com/bbielsa/vicostream).
 The original upstream history and [documentation](docs/upstream-README.md)
@@ -57,6 +57,21 @@ the first frame arrives. Selecting another camera stops the old stream and any
 pending movement first. Streaming-ticket caches are separate for each camera;
 the account sign-in is shared.
 
+Select **All cameras — Security station** to watch all configured cameras at
+once. Each tile has its own loading indicator, connection state, and automatic
+reconnect and ticket renewal. The grid adapts when the window is resized.
+Click a tile to select its movement controls; the highlighted border identifies
+the controlled camera. Movements are never broadcast to every camera. Choose a
+camera by name to return to single-camera view; the grid streams are stopped first.
+
+Concurrent cameras share one sign-in prompt and account renewal. Cancelling
+sign-in pauses affected tiles without repeatedly reopening the dialog; other
+healthy tiles continue displaying. Select the view again to retry. Receiver and
+decoder processes are separate for each camera, so simultaneous viewing uses
+more CPU and bandwidth than single-camera viewing. The station overview decodes
+each tile at up to 1280 pixels wide to reduce CPU load; selecting one camera
+restores its full requested display resolution.
+
 The direction buttons and arrow keys move the selected camera briefly, followed
 by a stop command. Space stops movement. Resizing or maximizing fits the video
 to the window while preserving its aspect ratio, without reconnecting. The
@@ -110,7 +125,7 @@ metadata. Public fixtures use synthetic identifiers and documentation addresses.
 ```powershell
 go test ./...
 go build -o provisionprobe.exe ./cmd/provisionprobe
-python -m py_compile camera_client.py camera_config.py provision_auth.py desktop_login.py desktop_viewer.py camera_session.py probe_signaling.py
+python -m py_compile camera_client.py camera_config.py provision_auth.py desktop_login.py desktop_viewer.py camera_tile.py camera_session.py probe_signaling.py
 ```
 
 Start the local HTTP simulation in one terminal:
@@ -130,7 +145,8 @@ python -m unittest discover -s tests -v
 The desktop checks use synthetic cameras and frames. HTTP checks exercise login,
 account metadata, ticket renewal, reauthentication, redirects, error responses,
 and independent ticket caches. Other checks cover configuration, movement stops,
-selection, loading animation, resizing, and stream switching.
+selection, loading animation, resizing, stream switching, concurrent tiles,
+focused movement controls, and coordinated sign-in across stream workers.
 
 The mock establishes behavior against its modeled responses, not the current
 provider's behavior. Its credentials are synthetic. No Postman cloud resources

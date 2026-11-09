@@ -85,6 +85,88 @@ class ViewerTests(unittest.TestCase):
         before = self.viewer.displayed_frames
         self.until(lambda: self.viewer.displayed_frames > before)
 
+    def station(self):
+        self.viewer.selector.current(len(self.viewer.cameras))
+        self.viewer.selector.event_generate('<<ComboboxSelected>>')
+        self.until(lambda: len(self.viewer.tiles) == 2 and all(playback.started.is_set() for playback in self.viewer.tiles))
+        return list(self.viewer.tiles)
+
+    def test_security_station_displays_both_and_controls_only_focused_tile(self):
+        first, second = self.station()
+        self.assertIsNone(self.viewer.playback)
+        self.assertFalse(self.viewer.connected)
+        self.frame(first, 'red')
+        self.frame(second, 'blue')
+        self.assertTrue(all(tile.connected for tile in self.viewer.tiles.values()))
+        self.assertFalse(any(tile.loading_active for tile in self.viewer.tiles.values()))
+        self.assertIn('2/2', self.viewer.status.get())
+        self.viewer.tiles[second].canvas.event_generate('<Button-1>', x=10, y=10)
+        self.viewer.direction_buttons['left'].invoke()
+        second.motion.request.assert_called_once_with('left')
+        first.motion.request.assert_not_called()
+
+    def test_station_reconnect_and_cancellation_leave_other_stream_running(self):
+        first, second = self.station()
+        self.frame(first)
+        self.frame(second)
+        first.notify('offline', None)
+        self.until(lambda: not self.viewer.tiles[first].connected)
+        self.assertTrue(self.viewer.tiles[first].loading_active)
+        self.frame(second)
+        self.assertTrue(self.viewer.tiles[second].connected)
+        first.notify('cancelled', 'Sign-in cancelled')
+        self.until(first.session.stop.is_set)
+        self.assertFalse(second.session.stop.is_set())
+        self.frame(second)
+
+    def test_leaving_station_stops_every_previous_stream(self):
+        first, second = self.station()
+        selected = self.select(0)
+        self.assertTrue(first.closed.is_set())
+        self.assertTrue(second.closed.is_set())
+        self.assertEqual(len(self.viewer.tiles), 1)
+        self.assertIs(self.viewer.playback, selected)
+
+    def test_station_opens_only_one_login_window_for_two_workers(self):
+        first, second = self.station()
+        observed = self.viewer.authentication.snapshot()
+        outcomes = []
+        def request(playback):
+            outcomes.append(self.viewer.authentication.request(playback.notify, playback.session.stop, observed))
+        with patch('desktop_login.login_window', return_value=True) as prompt, \
+             patch('camera_client.cloud_client', return_value=Mock()):
+            workers = [threading.Thread(target=request, args=(playback,)) for playback in (first, second)]
+            for worker in workers:
+                worker.start()
+            self.until(lambda: len(outcomes) == 2)
+            for worker in workers:
+                worker.join(timeout=1)
+            prompt.assert_called_once()
+        self.assertEqual(outcomes, [True, True])
+
+    def test_healthy_tile_keeps_rendering_during_modal_sign_in(self):
+        first, second = self.station()
+        self.frame(second)
+        before = self.viewer.tiles[second].frames
+        observed = []
+        def prompt(*args, **kwargs):
+            from PIL import Image
+            import tkinter as tk
+            encoded = io.BytesIO()
+            Image.new('RGB', (640, 360), 'blue').save(encoded, format='PNG')
+            second.session.frames.put(encoded.getvalue())
+            done = tk.BooleanVar(master=self.viewer.root, value=False)
+            self.viewer.root.after(200, lambda: done.set(True))
+            self.viewer.root.wait_variable(done)
+            observed.append(self.viewer.tiles[second].frames > before)
+            return False
+        request = {'event': threading.Event(), 'success': False}
+        with patch('desktop_login.login_window', side_effect=prompt), \
+             patch('camera_client.cloud_client', return_value=Mock()):
+            first.notify('login', request)
+            self.until(request['event'].is_set)
+        self.assertEqual(observed, [True])
+
     def test_idle_selection_loading_animation_and_first_frame(self):
         self.assertIsNone(self.viewer.session)
         self.assertFalse(self.viewer.connected)

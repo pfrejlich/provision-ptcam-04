@@ -17,6 +17,11 @@ assumptions:
     claim: Country and time-zone fields are supplied by configuration, with neutral defaults.
     reason: Private configuration loading and actual HTTP serialization are covered by tests using synthetic metadata.
     source: camera_config.py; provision_auth.py; tests/test_settings.py; tests/test_auth.py
+  - id: parallel-account-renewal
+    status: supported
+    claim: Concurrent expired-account ticket requests share one account renewal and each obtain a ticket.
+    reason: Two clients with the same store race through the real HTTP client against the synthetic simulation; assertions check one login and two tickets.
+    source: tests/test_auth.py; provision_auth.py
 unknowns:
   - Natural account-token expiration is not established by synthetic expiration tests.
   - Synthetic responses do not establish current provider availability or acceptance for every account region.

@@ -7,6 +7,7 @@ import os
 import socket
 import ssl
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -16,6 +17,7 @@ from pathlib import Path
 
 
 API_BASE = "https://api-eu.provisionisr-app.com"
+ACCOUNT_REFRESH_LOCK = threading.RLock()
 AUTH_ERRORS = {-1022, -1023, -1024, -1025, -1026, -1027}
 APP = {
     "versionName": "1.3.5(e0aaba)", "bundle": "com.provisionhome.app",
@@ -203,6 +205,10 @@ class CloudClient:
         return document
 
     def sign_in(self, email: str, password: str, serial: str, remember: bool = False) -> dict:
+        with ACCOUNT_REFRESH_LOCK:
+            return self._sign_in(email, password, serial, remember)
+
+    def _sign_in(self, email: str, password: str, serial: str, remember: bool) -> dict:
         account = self.authenticate(email, password)
         ticket = self.fetch_ticket(serial, account["token"])
         if remember:
@@ -210,7 +216,7 @@ class CloudClient:
         self.store.save(account)
         return ticket
 
-    def authorized_request(self, path: str, fields: dict) -> dict:
+    def _load_account(self):
         try:
             account = self.store.load()
         except ProvisionError:
@@ -219,12 +225,27 @@ class CloudClient:
             raise SignInRequired("Please sign in to Provision Home")
         if account.get("api_base") != self.api_base:
             raise SignInRequired("Saved sign-in belongs to another region; sign in again")
+        return account
+
+    def authorized_request(self, path: str, fields: dict) -> dict:
+        account = self._load_account()
         expired = bool(account.get("expires_at") and account["expires_at"] <= time.time() + 30)
         if not expired and account.get("token"):
             try:
                 return self.request(path, fields, account["token"])
             except SignInRequired:
                 pass
+        # Healthy requests remain parallel; only account replacement is serialized.
+        with ACCOUNT_REFRESH_LOCK:
+            latest = self._load_account()
+            if latest != account and latest.get("token"):
+                try:
+                    return self.request(path, fields, latest["token"])
+                except SignInRequired:
+                    pass
+            return self._renew_account_request(path, fields, latest)
+
+    def _renew_account_request(self, path, fields, account):
         if not account.get("email") or not account.get("password"):
             raise SignInRequired("Please sign in to Provision Home again")
         try:
